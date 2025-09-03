@@ -20,6 +20,7 @@ from rlbench.environment import Environment
 from rlbench.observation_config import ObservationConfig
 from rlbench.tasks import PutRubbishInBin, PutBooksOnBookshelf, EmptyContainer
 from rlbench.demo import Demo, ActionRepresentation
+from play_demo import action_conversion, get_target_pose
 
 LOW_DIM_STATE_SIZE = 91  # Size of the low-dimensional state vector for RLBench tasks. PutRubbishInBin=>91, PutBooksOnBookshelf=>308, EmptyContainer=>70
 
@@ -353,7 +354,14 @@ def main(argv):
         for demo_idx in tqdm(range(FLAGS.num_episodes), desc="Recording demonstrations"):
             env_logger.reset()
             demo = Demo.load(os.path.join(demos_dir, f"demo_{demo_idx:03d}.pkl"))
-            for action in demo.actions:
+
+            current_target = get_target_pose(demo, 0)
+            for i, _ in enumerate(demo.actions):
+                
+                previous_target = current_target
+                current_target = get_target_pose(demo, i)
+                
+                action = action_conversion(current_target, FLAGS.action_repr, not FLAGS.absolute_actions, previous_target)
                 timestep = env_logger.step(action)
                 if timestep.last():
                     break
