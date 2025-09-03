@@ -320,24 +320,22 @@ class Scene(object):
     def register_step_callback(self, func):
         self._step_callback = func
 
-    def get_demo(self, record: bool = True,
-                 callable_each_step: Callable[[Observation], None] = None,
-                 randomly_place: bool = True) -> Demo:
+    def get_demo(self, record: bool = True, callable_each_step: Callable[[Observation], None] = None, randomly_place: bool = True) -> Demo:
         """Returns a demo (list of observations)"""
 
+        instructions = []
         if not self._has_init_task:
             self.init_task()
         if not self._has_init_episode:
-            self.init_episode(self._variation_index,
-                              randomly_place=randomly_place)
+            instructions = self.init_episode(self._variation_index, randomly_place=randomly_place)
         self._has_init_episode = False
 
         waypoints = self.task.get_waypoints()
         if len(waypoints) == 0:
-            raise NoWaypointsError(
-                'No waypoints were found.', self.task)
+            raise NoWaypointsError('No waypoints were found.', self.task)
 
         demo = []
+        actions = []
         if record:
             self.pyrep.step()  # Need this here or get_force doesn't work...
             self._joint_position_action = None
@@ -350,18 +348,14 @@ class Scene(object):
                 if point.skip:
                     continue
                 grasped_objects = self.robot.gripper.get_grasped_objects()
-                colliding_shapes = [s for s in self.pyrep.get_objects_in_tree(
-                    object_type=ObjectType.SHAPE) if s not in grasped_objects
-                                    and s not in self._robot_shapes and s.is_collidable()
-                                    and self.robot.arm.check_arm_collision(s)]
+                colliding_shapes = [s for s in self.pyrep.get_objects_in_tree(object_type=ObjectType.SHAPE) if s not in grasped_objects and s not in self._robot_shapes and s.is_collidable() and self.robot.arm.check_arm_collision(s)]
                 [s.set_collidable(False) for s in colliding_shapes]
                 try:
                     path = point.get_path()
                     [s.set_collidable(True) for s in colliding_shapes]
                 except ConfigurationPathError as e:
                     [s.set_collidable(True) for s in colliding_shapes]
-                    raise DemoError(
-                        'Could not get a path for waypoint %d.' % i,
+                    raise DemoError('Could not get a path for waypoint %d.' % i,
                         self.task) from e
                 ext = point.get_ext()
                 path.visualize()
@@ -372,7 +366,7 @@ class Scene(object):
                     done = path.step()
                     self.step()
                     self._joint_position_action = np.append(path.get_executed_joint_position_action(), gripper_open)
-                    self._demo_record_step(demo, record, callable_each_step)
+                    self._demo_record_step(demo, record, callable_each_step, actions)
                     success, term = self.task.success()
 
                 point.end_of_path()
@@ -395,8 +389,7 @@ class Scene(object):
                                 self.step()
                                 self._joint_position_action = np.append(path.get_executed_joint_position_action(), gripper_open)
                                 if self._obs_config.record_gripper_closing:
-                                    self._demo_record_step(
-                                        demo, record, callable_each_step)
+                                    self._demo_record_step(demo, record, callable_each_step, actions)
                     elif 'close_gripper(' in ext:
                         start_of_bracket = ext.index('close_gripper(') + 14
                         contains_param = ext[start_of_bracket] != ')'
@@ -408,8 +401,7 @@ class Scene(object):
                                 self.step()
                                 self._joint_position_action = np.append(path.get_executed_joint_position_action(), gripper_open)
                                 if self._obs_config.record_gripper_closing:
-                                    self._demo_record_step(
-                                        demo, record, callable_each_step)
+                                    self._demo_record_step(demo, record, callable_each_step, actions)
 
                     if contains_param:
                         rest = ext[start_of_bracket:]
@@ -421,14 +413,13 @@ class Scene(object):
                             self.step()
                             self._joint_position_action = np.append(path.get_executed_joint_position_action(), gripper_open)
                             if self._obs_config.record_gripper_closing:
-                                self._demo_record_step(
-                                    demo, record, callable_each_step)
+                                self._demo_record_step(demo, record, callable_each_step, actions)
 
                     if 'close_gripper(' in ext:
                         for g_obj in self.task.get_graspable_objects():
                             gripper.grasp(g_obj)
 
-                    self._demo_record_step(demo, record, callable_each_step)
+                    self._demo_record_step(demo, record, callable_each_step, actions)
 
             if not self.task.should_repeat_waypoints() or success:
                 break
@@ -439,17 +430,20 @@ class Scene(object):
             for _ in range(10):
                 self.step()
                 self._joint_position_action = np.append(path.get_executed_joint_position_action(), gripper_open)
-                self._demo_record_step(demo, record, callable_each_step)
+                self._demo_record_step(demo, record, callable_each_step, actions)
                 success, term = self.task.success()
                 if success:
                     break
 
         success, term = self.task.success()
         if not success:
-            raise DemoError('Demo was completed, but was not successful.',
-                            self.task)
+            raise DemoError('Demo was completed, but was not successful.', self.task)
         processed_demo = Demo(demo)
         processed_demo.num_reset_attempts = self._attempts + 1
+        processed_demo.actions = actions
+        
+        if len(instructions) > 0:
+            processed_demo.instruction = instructions[0]
         return processed_demo
 
     def get_observation_config(self) -> ObservationConfig:
@@ -461,11 +455,12 @@ class Scene(object):
                 self._workspace_maxy > y > self._workspace_miny and
                 self._workspace_maxz > z > self._workspace_minz)
 
-    def _demo_record_step(self, demo_list, record, func):
+    def _demo_record_step(self, demo_list, record, func, actions):
         if record:
             demo_list.append(self.get_observation())
         if func is not None:
             func(self.get_observation())
+        actions.append(self._joint_position_action)
 
     def _set_camera_properties(self) -> None:
         def _set_rgb_props(rgb_cam: VisionSensor,

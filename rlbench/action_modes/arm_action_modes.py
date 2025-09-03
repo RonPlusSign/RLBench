@@ -17,9 +17,7 @@ from rlbench.const import SUPPORTED_ROBOTS
 
 def assert_action_shape(action: np.ndarray, expected_shape: tuple):
     if np.shape(action) != expected_shape:
-        raise InvalidActionError(
-            'Expected the action shape to be: %s, but was shape: %s' % (
-                str(expected_shape), str(np.shape(action))))
+        raise InvalidActionError('Expected the action shape to be: %s, but was shape: %s' % (str(expected_shape), str(np.shape(action))))
 
 
 def assert_unit_quaternion(quat):
@@ -63,6 +61,12 @@ class ArmActionMode(object):
 
     def set_control_mode(self, robot: Robot):
         robot.arm.set_control_loop_enabled(True)
+
+    def register_callback(self, callback):
+        pass
+
+    def deregister_callback(self, callback):
+        pass
 
 
 class JointVelocity(ArmActionMode):
@@ -132,6 +136,9 @@ class JointPosition(ArmActionMode):
 
     def action_shape(self, scene: Scene) -> tuple:
         return SUPPORTED_ROBOTS[scene.robot_setup][2],
+    
+    def action_bounds(self):
+        return np.array([-5.0, -5.0, -5.0, -5.0, -5.0, -5.0, -1.5]), np.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.5])
 
 
 class JointTorque(ArmActionMode):
@@ -282,6 +289,8 @@ class EndEffectorPoseViaPlanning(ArmActionMode):
     def action_shape(self, scene: Scene) -> tuple:
         return 7,
 
+    def action_bounds(self):
+        return np.array([-5.0, -5.0, -5.0, -5.0, -5.0, -5.0, -1.5]), np.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.5])
 
 class EndEffectorPoseViaIK(ArmActionMode):
     """High-level action where target pose is given and reached via IK.
@@ -345,6 +354,9 @@ class EndEffectorPoseViaIK(ArmActionMode):
 
     def action_shape(self, scene: Scene) -> tuple:
         return 7,
+
+    def action_bounds(self):
+        return np.array([-5.0, -5.0, -5.0, -5.0, -5.0, -5.0, -1.5]), np.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 1.5])
 
 class ERJointViaIK(ArmActionMode):
     """High-level action where target EE pose + Elbow angle is given in ER 

@@ -42,8 +42,12 @@ class MoveArmThenGripper(ActionMode):
         self.gripper_action_mode.action(scene, ee_action)
 
     def action_shape(self, scene: Scene):
-        return np.prod(self.arm_action_mode.action_shape(scene)) + np.prod(
-            self.gripper_action_mode.action_shape(scene))
+        return np.prod(self.arm_action_mode.action_shape(scene)) + np.prod(self.gripper_action_mode.action_shape(scene))
+
+    def action_bounds(self):
+        arm_low, arm_high = self.arm_action_mode.action_bounds()
+        gripper_low, gripper_high = self.gripper_action_mode.action_bounds()
+        return np.concatenate((arm_low, gripper_low)), np.concatenate((arm_high, gripper_high))
 
 
 # RLBench is highly customizable, in both observations and action modes.

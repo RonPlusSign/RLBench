@@ -1,13 +1,13 @@
 import logging
 from typing import List, Callable
+from tqdm import tqdm
 
 import numpy as np
 from pyrep import PyRep
 from pyrep.const import ObjectType
 from rlbench import utils
 from rlbench.action_modes.action_mode import ActionMode
-from rlbench.backend.exceptions import BoundaryError, WaypointError, \
-    TaskEnvironmentError
+from rlbench.backend.exceptions import BoundaryError, WaypointError, TaskEnvironmentError
 from rlbench.backend.observation import Observation
 from rlbench.backend.robot import Robot
 from rlbench.backend.scene import Scene
@@ -95,17 +95,14 @@ class TaskEnvironment(object):
     def step(self, action) -> (Observation, int, bool):
         # returns observation, reward, done, info
         if not self._reset_called:
-            raise RuntimeError(
-                "Call 'reset' before calling 'step' on a task.")
+            raise RuntimeError("Call 'reset' before calling 'step' on a task.")
         self._action_mode.action(self._scene, action)
         success, terminate = self._task.success()
         reward = float(success)
         if self._shaped_rewards:
             reward = self._task.reward()
             if reward is None:
-                raise RuntimeError(
-                    'User requested shaped rewards, but task %s does not have '
-                    'a defined reward() function.' % self._task.get_name())
+                raise RuntimeError('User requested shaped rewards, but task %s does not have a defined reward() function.' % self._task.get_name())
         return self._scene.get_observation(), reward, terminate
 
     def get_demos(self, amount: int, live_demos: bool = False,
@@ -117,50 +114,40 @@ class TaskEnvironment(object):
                   ) -> List[Demo]:
         """Negative means all demos"""
 
-        if not live_demos and (self._dataset_root is None
-                               or len(self._dataset_root) == 0):
-            raise RuntimeError(
-                "Can't ask for a stored demo when no dataset root provided.")
+        if not live_demos and (self._dataset_root is None or len(self._dataset_root) == 0):
+            raise RuntimeError("Can't ask for a stored demo when no dataset root provided.")
 
         if not live_demos:
             if self._dataset_root is None or len(self._dataset_root) == 0:
-                raise RuntimeError(
-                    "Can't ask for stored demo when no dataset root provided.")
-            demos = utils.get_stored_demos(
-                amount, image_paths, self._dataset_root, self._variation_number,
-                self._task.get_name(), self._obs_config,
-                random_selection, from_episode_number)
+                raise RuntimeError("Can't ask for stored demo when no dataset root provided.")
+            demos = utils.get_stored_demos(amount, image_paths, self._dataset_root, self._variation_number, self._task.get_name(), self._obs_config, random_selection, from_episode_number)
         else:
             ctr_loop = self._robot.arm.joints[0].is_control_loop_enabled()
             self._robot.arm.set_control_loop_enabled(True)
-            demos = self._get_live_demos(
-                amount, callable_each_step, max_attempts)
+            demos = self._get_live_demos(amount, callable_each_step, max_attempts)
             self._robot.arm.set_control_loop_enabled(ctr_loop)
         return demos
 
-    def _get_live_demos(self, amount: int,
-                        callable_each_step: Callable[
-                            [Observation], None] = None,
-                        max_attempts: int = _MAX_DEMO_ATTEMPTS) -> List[Demo]:
+    def _get_live_demos(self, amount: int, callable_each_step: Callable[[Observation], None] = None, max_attempts: int = _MAX_DEMO_ATTEMPTS) -> List[Demo]:
         demos = []
+        # for i in tqdm(range(amount), desc='Collecting live demos'):
         for i in range(amount):
             attempts = max_attempts
             while attempts > 0:
                 random_seed = np.random.get_state()
                 self.reset()
                 try:
-                    demo = self._scene.get_demo(
-                        callable_each_step=callable_each_step)
+                    demo = self._scene.get_demo(callable_each_step=callable_each_step)
                     demo.random_seed = random_seed
                     demos.append(demo)
                     break
                 except Exception as e:
                     attempts -= 1
                     logging.info('Bad demo. ' + str(e))
+                    print('Bad demo. ' + str(e))
             if attempts <= 0:
-                raise RuntimeError(
-                    'Could not collect demos. Maybe a problem with the task?')
-        return demos
+                raise RuntimeError('Could not collect demos. Maybe a problem with the task?')
+        return demos    
 
     def reset_to_demo(self, demo: Demo) -> (List[str], Observation):
         demo.restore_state()

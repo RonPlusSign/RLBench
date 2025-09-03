@@ -290,8 +290,7 @@ class Task(object):
         :return: Tuple containing 2 bools: first specifies if the task is currently successful,
             second specifies if the task should terminate (either from success or from broken constraints).
         """
-        all_fails_met = np.all(
-            [cond.condition_met()[0] for cond in self._fail_conditions])
+        all_fails_met = np.all([cond.condition_met()[0] for cond in self._fail_conditions])
         if len(self._fail_conditions) > 0 and all_fails_met:
             return False, True
         all_met = np.all(
