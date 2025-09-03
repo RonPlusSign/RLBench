@@ -10,7 +10,7 @@ class CameraConfig(object):
                  depth_noise: NoiseModel=Identity(),
                  point_cloud=True,
                  mask=True,
-                 image_size=(128, 128),
+                 image_size=(256, 256),
                  render_mode=RenderMode.OPENGL3,
                  masks_as_one_channel=True,
                  depth_in_meters=False):
