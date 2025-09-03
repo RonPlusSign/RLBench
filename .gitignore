@@ -117,3 +117,11 @@ dmypy.json
 .pyre/
 
 index.html
+
+LIFT3D
+runs
+checkpoints
+datasets
+logs
+.vscode
+openpi
