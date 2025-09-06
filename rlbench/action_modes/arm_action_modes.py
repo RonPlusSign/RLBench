@@ -19,7 +19,6 @@ def assert_action_shape(action: np.ndarray, expected_shape: tuple):
     if np.shape(action) != expected_shape:
         raise InvalidActionError('Expected the action shape to be: %s, but was shape: %s' % (str(expected_shape), str(np.shape(action))))
 
-
 def assert_unit_quaternion(quat):
     if not np.isclose(np.linalg.norm(quat), 1.0):
         raise InvalidActionError('Action contained non unit quaternion!')
@@ -61,12 +60,6 @@ class ArmActionMode(object):
 
     def set_control_mode(self, robot: Robot):
         robot.arm.set_control_loop_enabled(True)
-
-    def register_callback(self, callback):
-        pass
-
-    def deregister_callback(self, callback):
-        pass
 
 
 class JointVelocity(ArmActionMode):
@@ -115,6 +108,17 @@ class JointPosition(ArmActionMode):
             absolute_mode: If we should opperate in 'absolute', or 'delta' mode.
         """
         self._absolute_mode = absolute_mode
+        self._callbacks = [] 
+
+    def register_callback(self, callback):
+        self._callbacks.append(callback)
+    
+    def record_end(self, scene, steps=60, step_scene=True):
+        for callback in self._callbacks:
+            for _ in range(steps):
+                if step_scene:
+                    scene.step()
+                callback(scene.get_observation())
 
     def action(self, scene: Scene, action: np.ndarray):
         self.action_pre_step(scene, action)
@@ -133,6 +137,8 @@ class JointPosition(ArmActionMode):
     def action_post_step(self, scene: Scene, action: np.ndarray):
         scene.robot.arm.set_joint_target_positions(
             scene.robot.arm.get_joint_positions())
+        for callback in self._callbacks:
+            callback(scene.get_observation())
 
     def action_shape(self, scene: Scene) -> tuple:
         return SUPPORTED_ROBOTS[scene.robot_setup][2],
@@ -211,6 +217,17 @@ class EndEffectorPoseViaPlanning(ArmActionMode):
         self._frame = frame
         self._collision_checking = collision_checking
         self._robot_shapes = None
+        self._callbacks = [] 
+
+    def register_callback(self, callback):
+        self._callbacks.append(callback)
+    
+    def record_end(self, scene, steps=60, step_scene=True):
+        for callback in self._callbacks:
+            for _ in range(steps):
+                if step_scene:
+                    scene.step()
+                callback(scene.get_observation())
 
     def _quick_boundary_check(self, scene: Scene, action: np.ndarray):
         pos_to_check = action[:3]
@@ -281,6 +298,8 @@ class EndEffectorPoseViaPlanning(ArmActionMode):
         while not done:
             done = path.step()
             scene.step()
+            for callback in self._callbacks:
+                callback(scene.get_observation())
             success, terminate = scene.task.success()
             # If the task succeeds while traversing path, then break early
             if success:

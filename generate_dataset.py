@@ -164,7 +164,7 @@ def save_demo_video(demo, save_path, demo_idx=0, fps=10):
         print("Skipping video saving: imageio not available. Install with 'pip install imageio'")
         return
 
-    videos_path = os.path.join(save_path, "videos")
+    videos_path = os.path.join(save_path, "videos", FLAGS.task)
     os.makedirs(videos_path, exist_ok=True)
 
     demo_folder = os.path.join(videos_path, f"demo_{demo_idx:03d}")
@@ -297,7 +297,7 @@ def main(argv):
     task = env.get_task(task_class)
 
     # Collect demonstrations if missing
-    demos_dir = os.path.join(FLAGS.save_path, FLAGS.task, "demos")
+    demos_dir = os.path.join(FLAGS.save_path, "demos", FLAGS.task)
     print(f"Generating {FLAGS.num_episodes} demos for task: {FLAGS.task}")
     os.makedirs(demos_dir, exist_ok=True)
     for i in tqdm(range(FLAGS.num_episodes), desc="Generating demos"):
@@ -307,18 +307,21 @@ def main(argv):
             demo = task.get_demos(1, live_demos=True)[0]
             demo.save(demo_file, action_representation=action_repr())
             del demo
-        else: # Load the demo and save it again
-            demo = Demo.load(demo_file)
-            demo.save(demo_file, action_representation=action_repr())
-            del demo
+        # else: # Load the demo and save it again
+        #     demo = Demo.load(demo_file)
+        #     demo.save(demo_file, action_representation=action_repr())
+        #     del demo
 
     # Generate RLDS dataset
-    dataset_path = os.path.join(FLAGS.save_path, FLAGS.task)
+    dataset_path = os.path.join(FLAGS.save_path,
+                                f"{FLAGS.action_repr}_{'absolute' if FLAGS.absolute_actions else 'relative'}",
+                                f"{FLAGS.task}_{FLAGS.action_repr}_{'absolute' if FLAGS.absolute_actions else 'relative'}",
+                                "1.0.0")
     os.makedirs(dataset_path, exist_ok=True)
 
     # RLDS dataset configuration
     dataset_config = tfds.rlds.rlds_base.DatasetConfig(
-        name=FLAGS.task,
+        name=f"{FLAGS.task}_{FLAGS.action_repr}_{'absolute' if FLAGS.absolute_actions else 'relative'}",
         observation_info={
             "left_shoulder_rgb": tfds.features.Image(shape=(256, 256, 3), dtype=tf.uint8),
             "right_shoulder_rgb": tfds.features.Image(shape=(256, 256, 3), dtype=tf.uint8),
@@ -367,7 +370,7 @@ def main(argv):
                     break
 
             if FLAGS.save_videos:
-                save_demo_video(demo, dataset_path, demo_idx)
+                save_demo_video(demo, FLAGS.save_path, demo_idx)
 
     print("Dataset generation complete.")
     env.shutdown()
