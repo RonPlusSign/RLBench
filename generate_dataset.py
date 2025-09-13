@@ -39,12 +39,6 @@ python generate_dataset.py
 """
 
 FLAGS = flags.FLAGS
-flags.DEFINE_string("save_path", os.path.join(os.getcwd(), "datasets"), "Path to save the RLDS dataset.")
-flags.DEFINE_integer("num_episodes", 100, "Number of demonstrations to record.")
-flags.DEFINE_string("task", "PutRubbishInBin", "Name of the RLBench task.")
-flags.DEFINE_enum("action_repr", "quat", ["euler", "quat"], "Action representation.", required=False)
-flags.DEFINE_boolean("absolute_actions", True, "Whether to use absolute actions (True) or relative actions (False).", required=False)
-flags.DEFINE_boolean("save_videos", True, "Whether to save videos of the demonstrations.", required=False)
 
 def action_dimension():
     return 7 if FLAGS.action_repr == "euler" else 8
@@ -314,6 +308,7 @@ def main(argv):
 
     # Generate RLDS dataset
     dataset_path = os.path.join(FLAGS.save_path,
+                                "rlds",
                                 f"{FLAGS.action_repr}_{'absolute' if FLAGS.absolute_actions else 'relative'}",
                                 f"{FLAGS.task}_{FLAGS.action_repr}_{'absolute' if FLAGS.absolute_actions else 'relative'}",
                                 "1.0.0")
@@ -358,13 +353,13 @@ def main(argv):
             env_logger.reset()
             demo = Demo.load(os.path.join(demos_dir, f"demo_{demo_idx:03d}.pkl"))
 
-            current_target = get_target_pose(demo, 0)
+            current_pose = get_target_pose(demo, 0)
             for i, _ in enumerate(demo.actions):
-                
-                previous_target = current_target
-                current_target = get_target_pose(demo, i)
-                
-                action = action_conversion(current_target, FLAGS.action_repr, not FLAGS.absolute_actions, previous_target)
+
+                current_pose = get_target_pose(demo, i)
+                next_pose = get_target_pose(demo, i + 1 if i + 1 < len(demo) else i)    # next pose (the one to reach)
+
+                action = action_conversion(next_pose, FLAGS.action_repr, not FLAGS.absolute_actions, current_pose)
                 timestep = env_logger.step(action)
                 if timestep.last():
                     break
@@ -379,4 +374,10 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    flags.DEFINE_string("save_path", os.path.join(os.getcwd(), "datasets"), "Path to save the RLDS dataset.")
+    flags.DEFINE_integer("num_episodes", 100, "Number of demonstrations to record.")
+    flags.DEFINE_string("task", "PutRubbishInBin", "Name of the RLBench task.")
+    flags.DEFINE_enum("action_repr", "quat", ["euler", "quat"], "Action representation.", required=False)
+    flags.DEFINE_boolean("absolute_actions", True, "Whether to use absolute actions (True) or relative actions (False).", required=False)
+    flags.DEFINE_boolean("save_videos", True, "Whether to save videos of the demonstrations.", required=False)
     app.run(main)
