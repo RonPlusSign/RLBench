@@ -25,7 +25,7 @@ from rlbench.observation_config import ObservationConfig
 from rlbench.demo import Demo
 
 # Helpers
-from generate_dataset import action_repr, get_target_pose, action_conversion, action_dimension
+from generate_dataset_rlds import action_repr, get_target_pose, action_conversion, action_dimension
 
 FLAGS = flags.FLAGS
 
