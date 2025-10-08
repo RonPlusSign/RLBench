@@ -1,7 +1,7 @@
 import numpy as np
 from absl import app
 from absl import flags
-from rlbench.action_modes.action_mode import MoveArmThenGripper
+from rlbench.action_modes.action_mode import MoveArmThenGripper, JointPositionActionMode
 from rlbench.action_modes.arm_action_modes import EndEffectorPoseViaPlanning
 from rlbench.action_modes.gripper_action_modes import Discrete
 from rlbench.environment import Environment
@@ -121,6 +121,9 @@ def get_target_pose(demo: Demo, index: int):
     """ Get the target pose (gripper position and open state) for a specific observation in the demo. """
     return np.array([*demo._observations[max(0, index)].gripper_pose, demo._observations[max(0, index)].gripper_open])
 
+def get_target_joints(demo: Demo, index: int):
+    """ Get the target joint positions for a specific observation in the demo. """
+    return np.array([*demo._observations[max(0, index)].joint_positions, demo._observations[max(0, index)].gripper_open])
 
 def main(argv):
     # Dynamically get the task class
@@ -138,10 +141,11 @@ def main(argv):
     # expects absolute end-effector poses each step. If the demo uses relative
     # (delta) poses, set absolute_mode=False.
     is_relative = FLAGS.positioning == 'relative'
-    action_mode = MoveArmThenGripper(
-        arm_action_mode=EndEffectorPoseViaPlanning(absolute_mode=not is_relative),
-        gripper_action_mode=Discrete(),
-    )
+    # action_mode = MoveArmThenGripper(
+    #     arm_action_mode=EndEffectorPoseViaPlanning(absolute_mode=not is_relative),
+    #     gripper_action_mode=Discrete(),
+    # )
+    action_mode = JointPositionActionMode()
     env = Environment(action_mode, obs_config=obs_config, headless=False)
     env.launch()
 
@@ -158,16 +162,23 @@ def main(argv):
     print("Reset to demo initial state.")
     print("Instructions: ", descriptions)
     current_target = get_target_pose(demo, 0)
+    
+    # Initial pose:
+    print(f"Initial target pose: {current_target}")
 
     # Replay the demo actions
-    for i, _ in tqdm(enumerate(demo.actions), total=len(demo.actions), desc="Replaying demo"):
+    for i, _ in enumerate(demo.actions): # tqdm(enumerate(demo.actions), total=len(demo.actions), desc="Replaying demo"):
         try:
             # Instead of using the recorded action, build the action from the recorded gripper pose + gripper open state (which are always absolute). 
             # How we do that depends on whether the demo is relative (deltas) or absolute (poses).
-            previous_target = current_target
-            current_target = get_target_pose(demo, i)
+            # previous_target = current_target
+            # current_target = get_target_pose(demo, i)
+            # action = action_conversion(current_target, 'quat', is_relative, previous_target)
+            
+            action = get_target_joints(demo, i)
 
-            action = action_conversion(current_target, 'quat', is_relative, previous_target)
+            print(f"Action = {action}")
+            
             obs, reward, terminate = task.step(action)
         except Exception as e:
             print(f"Error during step {i+1}: {e}")
