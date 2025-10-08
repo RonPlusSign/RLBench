@@ -8,7 +8,6 @@ from LIFT3D.lift3d.envs.rlbench_env import RLBenchEvaluator, RLBenchActionMode
 import numpy as np
 import wandb
 
-
 class OpenVLAPolicy(torch.nn.Module):
     """Adapter for OpenVLA model to conform to RLBenchEvaluator policy interface."""
     def __init__(self, processor, model, device):
@@ -18,17 +17,15 @@ class OpenVLAPolicy(torch.nn.Module):
         self.device = device
 
     def forward(self, images, point_clouds, robot_states, texts):
-
+        """Predict action given observations and text prompt """
+        
         # Convert tensor images [B, C, H, W] to PIL images
         batch_size = images.shape[0]
         pil_images = []
+        # print(f"Images shape: {images.shape}")
         for i in range(batch_size):
             img = images[i].permute(1, 2, 0).cpu().numpy().astype('uint8')
             pil_images.append(Image.fromarray(img))
-
-            # Save image to disk
-            # img_path = f"image_{i}.png"
-            # pil_images[-1].save(img_path)
 
         # Form prompts
         prompts = [f"In: What action should the robot take to {text}?\nOut:" for text in texts]
@@ -40,15 +37,11 @@ class OpenVLAPolicy(torch.nn.Module):
         # Predict action
         action = self.model.predict_action(**inputs, unnorm_key='PutRubbishInBin_euler_relative', do_sample=False) # TODO: CHANGE THIS BASED ON DATASET USED FOR FINETUNING
 
-        # TODO: TEST WITH HIGHER JUMPS
-        # action[0] *= 10
-        # action[1] *= 10
-        # action[2] *= 10
-
         # Ensure tensor output on CPU
-        if isinstance(action, torch.Tensor):
-            return action.cpu()
+        # if isinstance(action, torch.Tensor):
+        #     return action.cpu()
         return torch.tensor(action)
+
 
 def test_openvla(task_name, n_episodes):
     # Configuration
@@ -56,7 +49,7 @@ def test_openvla(task_name, n_episodes):
     # checkpoint_path = "/home/adelli/RLBench/checkpoints/openvla-7b"
     # checkpoint_path = "/home/adelli/openvla/checkpoints/openvla-7b+PutRubbishInBin_relative_euler+b10+lr-0.0005+lora-r32+dropout-0.0--image_aug"
     # checkpoint_path = "/home/adelli/openvla/checkpoints/openvla-7b+PutRubbishInBin_absolute_euler+b10+lr-0.0005+lora-r32+dropout-0.0--image_aug"
-    checkpoint_path = "/home/adelli/openvla/checkpoints/openvla-7b+PutRubbishInBin_euler_relative+b10+lr-0.0005+lora-r32+dropout-0.0--image_aug"
+    checkpoint_path = "/home/adelli/openvla/checkpoints/openvla-7b+PutRubbishInBin_euler_relative+b16+lr-0.0005+lora-r32+dropout-0.0"
     results_dir = "runs/openvla_test"
     os.makedirs(results_dir, exist_ok=True)
 
@@ -80,7 +73,7 @@ def test_openvla(task_name, n_episodes):
         vla.norm_stats = norm_stats
 
     policy = OpenVLAPolicy(processor, vla, device)
-    max_steps = 150
+    max_steps = 300 if task_name == "put_rubbish_in_bin" else (400 if task_name == "put_books_on_bookshelf" else 1000)
 
     os.environ['LIBGL_ALWAYS_SOFTWARE'] = 'true'
 
@@ -91,17 +84,19 @@ def test_openvla(task_name, n_episodes):
         image_size=256,
         action_mode=RLBenchActionMode.eepose_then_gripper_action_mode(absolute=False),
         camera_name="left_shoulder",
-        point_cloud_camera_names=[],
+        point_cloud_camera_names=["overhead", "wrist"],
         use_point_crop=True,
         num_points=1024,
         max_episode_length=max_steps,
         rotation_representation='euler',
         headless=True,
         verbose_warnings=True,
-        cinematic_record_enabled=True
+        cinematic_record_enabled=False,
+        require_video_wrapper=True
     )
-    success_rate, avg_rewards = evaluator.evaluate(n_episodes, policy, verbose=True, verbose_with_cinematic=True)
+    success_rate, avg_rewards = evaluator.evaluate(n_episodes, policy, verbose=True, verbose_with_cinematic=False)
     evaluator.callback_verbose(wandb_logger=wandb)
+    # evaluator.callback(logging_info=wandb)
     print(f"Task {task_name}: success_rate={success_rate}, avg_rewards={avg_rewards}")
     results[task_name] = {"success_rate": success_rate, "avg_rewards": avg_rewards}
 
