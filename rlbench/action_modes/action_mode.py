@@ -62,7 +62,7 @@ class JointPositionActionMode(ActionMode):
 
     def __init__(self):
         super(JointPositionActionMode, self).__init__(
-            JointPosition(False), GripperJointPosition(True))
+            JointPosition(True), GripperJointPosition(True))
 
     def action(self, scene: Scene, action: np.ndarray):
         arm_act_size = np.prod(self.arm_action_mode.action_shape(scene))

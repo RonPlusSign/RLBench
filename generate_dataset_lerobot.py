@@ -16,6 +16,7 @@ from huggingface_hub import Repository, create_repo
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 # RLBench
+from play_demo import get_target_joints
 from rlbench import Environment
 from rlbench.tasks import PutRubbishInBin, PutBooksOnBookshelf, EmptyContainer
 from rlbench.action_modes.action_mode import MoveArmThenGripper
@@ -112,8 +113,15 @@ def main(argv):
 
     fps = 10
     camera_names = ["left_shoulder_rgb", "right_shoulder_rgb", "front_rgb", "wrist_rgb", "overhead_rgb"]
-    repo_name = f"RLBench-{FLAGS.task}-{FLAGS.action_repr}-{'absolute' if FLAGS.absolute_actions else 'relative'}"
+    # repo_name = f"RLBench-{FLAGS.task}-{FLAGS.action_repr}-{'absolute' if FLAGS.absolute_actions else 'relative'}"
+    repo_name = f"RLBench-{FLAGS.task}-joint_positions"
     repo_id = f"RonPlusSign/{repo_name}"
+    
+    task_descriptions = {   
+        "PutRubbishInBin": "throw away the trash, leaving any other objects alone",
+        "PutBooksOnBookshelf": "put 1 books on bookshelf",
+        "EmptyContainer": "remove whatever you find in the big box in the middle and leave them in the red one"
+    }
     
     dataset = LeRobotDataset.create(
         repo_id=repo_id,
@@ -127,11 +135,44 @@ def main(argv):
                 "names": ["x", "y", "z", "qx", "qy", "qz", "qw", "gripper"],
                 "description": "End-effector position (x,y,z), orientation (qx,qy,qz,qw) and gripper state (0.0 closed, 1.0 open).",
             },
+
+            # TODO: IF USING DELTA EEF ACTIONS, UNCOMMENT THESE
+            # "action": {
+            #     "dtype": "float32",
+            #     "shape": (7 if FLAGS.action_repr == "euler" else 8,),
+            #     "names": ["x", "y", "z"] + (["roll", "pitch", "yaw"] if FLAGS.action_repr == "euler" else ["qx", "qy", "qz", "qw"]) + ["gripper"],
+            #     "description": f"Delta action applied at each step, in {'Euler' if FLAGS.action_repr == 'euler' else 'Quaternion'} representation [xyz+rotation+gripper].",
+            # },
+            # "observation.joint_positions": {
+            #     "dtype": "float32",
+            #     "shape": (7,),
+            #     "names": ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7"],
+            #     "description": "Robot joint positions (absolute rotations).",
+            # },
+            # "observation.gripper_open": {
+            #     "dtype": "float32",
+            #     "shape": (1,),
+            #     "names": ["gripper_open"],
+            #     "description": "Gripper open state (0.0 closed, 1.0 open).",
+            # },
+            
+            # TODO: IF USING ABSOLUTE JOINT POSITION ACTIONS, USE THESE
             "action": {
                 "dtype": "float32",
-                "shape": (7 if FLAGS.action_repr == "euler" else 8,),
-                "names": ["x", "y", "z"] + (["roll", "pitch", "yaw"] if FLAGS.action_repr == "euler" else ["qx", "qy", "qz", "qw"]) + ["gripper"],
-                "description": f"Action applied at each step, in {'Euler' if FLAGS.action_repr == 'euler' else 'Quaternion'} representation + gripper (0.0 close, 1.0 open).",
+                "shape": (8,),
+                "names": ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6", "joint_7", "gripper"],
+                "description": "Absolute joint position action applied at each step [joint_1 to joint_7 + gripper].",
+            },
+            
+            "task_description": {
+                "dtype": "string",
+                "shape": (1,),
+                "description": "A natural language description of the task.",
+            },
+            "next.done": {
+                "dtype": "boolean",
+                "shape": (1,),
+                "description": "Indicates the end of an episode ; True for the last frame in each episode.",
             },
             **{f"observation.images.{cam}": {
                     "dtype": "video",
@@ -151,18 +192,29 @@ def main(argv):
             # Create the frame data, following the same structure as the features defined above
             frame_data = {
                 "observation.state": get_target_pose(demo, frame_index).astype(np.float32),
-                "action": action_conversion(
-                        get_target_pose(demo, frame_index + 1 if frame_index < len(demo) - 1 else frame_index),
-                        action_repr().value,
-                        not FLAGS.absolute_actions,
-                        get_target_pose(demo, frame_index)
-                ).astype(np.float32)
+                
+                # TODO: IF USING DELTA EEF ACTIONS, UNCOMMENT THESE
+                # "action": action_conversion(
+                #         get_target_pose(demo, frame_index + 1 if frame_index < len(demo) - 1 else frame_index),
+                #         action_repr().value,
+                #         not FLAGS.absolute_actions,
+                #         get_target_pose(demo, frame_index)
+                # ).astype(np.float32),
+                # "observation.joint_positions": observation.joint_positions.astype(np.float32),
+                # "observation.gripper_open": np.array([observation.gripper_open], dtype=np.float32),
+                
+                # TODO: IF USING ABSOLUTE JOINT POSITION ACTIONS, USE THESE
+                "action": get_target_joints(demo, frame_index + 1 if frame_index < len(demo) - 1 else frame_index).astype(np.float32),
+                
+                "next.done": frame_index == len(demo) - 1,
+                "task": task.get_name(),
+                "task_description": task_descriptions[FLAGS.task]
             }
             for cam in camera_names:
                 frame_data[f"observation.images.{cam}"] = getattr(observation, cam)
             
             # Save the frame
-            dataset.add_frame(frame_data, task=task.get_name())
+            dataset.add_frame(frame_data)
         dataset.save_episode()
         
     dataset.push_to_hub()
