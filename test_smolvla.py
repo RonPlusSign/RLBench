@@ -29,9 +29,22 @@ import sys
 from lerobot.policies.factory import make_policy, make_policy_config, make_pre_post_processors
 from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy, SmolVLAConfig
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-
+from lerobot.policies.utils import build_inference_frame, make_robot_action
+from lerobot.datasets.utils import hw_to_dataset_features
+from lerobot.utils.constants import ACTION, OBS_STR
 import lerobot.policies.smolvla
 
+OBS_CAMERA_KEYS = [ "left_shoulder_rgb", "right_shoulder_rgb", "front_rgb", "wrist_rgb", "overhead_rgb" ]
+OBS_STATE_NAMES = [ "x", "y", "z", "roll", "pitch", "yaw", "gripper_open" ]
+ACTION_NAMES = ["x", "y", "z", "roll", "pitch", "yaw", "gripper_open"]
+DEFAULT_IMAGE_SHAPE = (256, 256, 3)
+
+obs_hw_features: dict[str, type | tuple] = {name: float for name in OBS_STATE_NAMES}
+obs_hw_features.update({camera: DEFAULT_IMAGE_SHAPE for camera in OBS_CAMERA_KEYS})
+obs_features = hw_to_dataset_features(obs_hw_features, prefix=OBS_STR, use_video=True)
+action_hw_features: dict[str, type | tuple] = {name: float for name in ACTION_NAMES}
+action_features = hw_to_dataset_features(action_hw_features, prefix=ACTION, use_video=False)
+dataset_features = {**obs_features, **action_features}
 
 class SmolPolicy:
     """Adapter for SmolVLA model to conform to RLBench policy interface."""
@@ -40,116 +53,57 @@ class SmolPolicy:
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
         self.device = device
+        self.dataset_features = dataset_features
+        self.cameras = OBS_CAMERA_KEYS
+
         print(f"SmolVLA policy initialized on device: {device}")
 
     def predict(self, observation, task_description):
         """Predict action given observation and text prompt"""
         
-        cameras = ["left_shoulder_rgb", "right_shoulder_rgb", "wrist_rgb", "front_rgb", "overhead_rgb"]
-        # cameras = ["front_rgb", "wrist_rgb"]
+        raw_observation: dict[str, np.ndarray | float] = {}
         
         # Get RGB image from the specified camera
-        for camera in cameras:
+        for camera in self.cameras:
             if not hasattr(observation, camera) or getattr(observation, camera) is None:
                 raise ValueError(f"No {camera} image available in observation")
 
-            img = getattr(observation, camera)
-            # if img.dtype != np.uint8: # Convert numpy array to PIL image
-            #     img = Image.fromarray((img * 255).astype(np.uint8))
-
-            # Convert action values to [0, 1] range # TODO: DONE TO TEST HuggingFaceVLA/smolvla_libero
-            if img.dtype == np.uint8:
-                img = img.astype(np.float32) / 255.0
+            raw_observation[camera] = getattr(observation, camera)
             
-            img = np.transpose(img, (2, 0, 1)) # Convert images from (H, W, C) to (C, H, W)
-            img = torch.from_numpy(img).float().to(self.device) # Convert to torch tensor and move to device
-            
-            # Save image back for observation
-            img_to_save = (img.cpu().numpy().transpose(1, 2, 0) * 255).astype(np.uint8)
-            path = f"debug_{camera}.png"
-            Image.fromarray(img_to_save).save(path)
-            sys.exit(1)
-            
-            setattr(observation, camera, img)
-            
-        # Form prompt   # TODO: TEST ALSO WITHOUT "In: ...\nOut:"
+        # Form prompt
         # prompt = f"In: What action should the robot take to {task_description}?\nOut:"
         prompt = task_description
-        # print(f"  Joint positions: {observation.joint_positions}\n    Gripper_open: {observation.gripper_open}\n  Gripper_pose: {observation.gripper_pose}")  # DEBUG
 
-        # Convert gripper_pose from [xyz qx qy qz qw] to [xyz rx ry rz rw]   # TODO: DONE TO TEST HuggingFaceVLA/smolvla_libero
-        # gripper_pose = observation.gripper_pose  # [x, y, z, qx, qy, qz, qw]
-        # rotation = Rotation.from_quat(gripper_pose[3:7])  # Convert quaternion to rotation object
-        # euler = rotation.as_euler('xyz', degrees=False)  # Convert to Euler angles (rx, ry, rz)
-        # gripper_pose_euler = np.concatenate([gripper_pose[:3], euler])  # [x, y, z, rx, ry, rz]
+        # Convert gripper_pose from [xyz qx qy qz qw] to [xyz rx ry rz rw]
+        gripper_pose = observation.gripper_pose  # [x, y, z, qx, qy, qz, qw]
+        rotation = Rotation.from_quat(gripper_pose[3:7])  # Convert quaternion to rotation object
+        euler = rotation.as_euler('xyz', degrees=False)  # Convert to Euler angles (rx, ry, rz)
 
-        data = {
-            **{f"observation.images.{camera}": getattr(observation, camera) for camera in cameras},
-            # "observation.images.image": getattr(observation, "front_rgb"),   # Use front camera
-            # "observation.images.image2": getattr(observation, "wrist_rgb"),   # Use wrist camera
-            
-            "observation.state": torch.tensor(observation.gripper_pose.tolist() + [observation.gripper_open], dtype=torch.float32, device=self.device),
-            # "observation.state": torch.tensor(gripper_pose_euler.tolist() + [observation.gripper_open], dtype=torch.float32, device=self.device),
-            # "observation.state.joint": torch.tensor(observation.joint_positions.tolist(), dtype=torch.float32, device=self.device),
-            "task_description": prompt,
-            "task": prompt,
-        }
+        # Dim=7: [ x, y, z, rx, ry, rz, gripper_open]
+        state_vector = np.concatenate([gripper_pose[:3], euler, np.array([observation.gripper_open], dtype=np.float32)])
+
+        for name, value in zip(OBS_STATE_NAMES, state_vector):
+            raw_observation[name] = float(value)
+
+        processed_observation = build_inference_frame(raw_observation, device=self.device, ds_features=self.dataset_features, task=prompt)
 
         # Preprocess data
-        data = self.preprocessor(data)
+        processed_observation = self.preprocessor(processed_observation)
 
         # Predict action
-        action_chunk = self.model.select_action(data)
-        
+        action_chunk = self.model.select_action(processed_observation)
+
         # Postprocess action
         action_chunk = self.postprocessor(action_chunk)
         
         # Convert actions from tensor to numpy
         actions = torch.tensor(action_chunk).cpu().numpy()
         
-        # Add "1" as gripper open command (fully open)
-        # actions = np.hstack([actions, np.ones((actions.shape[0], 1))])  # Gripper open command
-
-        print(f"Predicted {actions.shape[0]} actions:\n{actions}")
-        # return actions
-
-        # SmolVLA outputs: [x, y, z, rx, ry, rz, gripper] for each action
-        # RLBench expects: [x, y, z, qx, qy, qz, qw, gripper]
+        # Round the last dimension (gripper) to 0 or 1 to avoid fractional gripper commands
+        actions[:, -1] = np.round(actions[:, -1])
         
-        # Extract position, euler angles, and gripper
-        pos = actions[:, :3]
-        euler = actions[:, 3:6]  # Euler angles in radians
-        gripper = actions[:, 6:7]
-
-        # Convert euler angles to quaternion
-        rotation = Rotation.from_euler('xyz', euler)
-        quat = rotation.as_quat()  # Returns [x, y, z, w]
-        
-        # Ensure quaternion is unit quaternion (normalize)
-        quat = quat / np.linalg.norm(quat)
-        
-        # Combine into RLBench action format: [x, y, z, qx, qy, qz, qw, gripper]
-        rlbench_actions = np.concatenate([pos, quat, gripper], axis=1)
-        return rlbench_actions
-
-
-def get_unnorm_key_from_checkpoint(checkpoint_path):
-    """Determine the unnorm_key based on the checkpoint path."""
-    checkpoint_name = os.path.basename(checkpoint_path)
-    
-    # Extract the pattern: <TaskName>_<euler/quat>_<relative/absolute>
-    if '+' in checkpoint_name:
-        # Extract everything after the '+' and before any additional '+'
-        parts = checkpoint_name.split('+')
-        if len(parts) >= 2:
-            task_config = parts[1].split('+')[0]  # Get first part after '+', before any additional '+'
-            unnorm_key = task_config
-            print(f"Determined unnorm_key from checkpoint '{checkpoint_name}': {unnorm_key}")
-            return unnorm_key
-    
-    # Fallback if pattern not found
-    print(f"Warning: Could not parse checkpoint name '{checkpoint_name}', using default")
-    return "PutRubbishInBin_euler_relative"
+        print(f"Predicted {actions.shape[0]} actions:\n{actions}")    # DEBUG
+        return actions
 
 
 def save_episode_videos(frames_dict, save_dir, episode_idx, fps=10):
@@ -161,11 +115,40 @@ def save_episode_videos(frames_dict, save_dir, episode_idx, fps=10):
         if frames:
             video_path = os.path.join(episode_dir, f"{camera_name}.mp4")
             # Ensure frames are uint8
-            frames = [frame.astype(np.uint8) if frame.dtype != np.uint8 else frame for frame in frames]
+            frames = [np.array(frame).astype(np.uint8) for frame in frames]
             try:
                 imageio.mimsave(video_path, frames, fps=fps)
             except Exception as e:
                 print(f"Warning: Could not save video for {camera_name}: {e}")
+
+
+def convert_euler_to_quat(actions):
+    """
+    Convert actions from Euler angles to quaternions.
+    Assumes actions shape is (N, 7) with [x, y, z, rx, ry, rz, gripper].
+    Returns actions in shape (N, 8) with [x, y, z, qx, qy, qz, qw, gripper].
+    """
+    
+    if actions.shape[1] != 7:
+        raise ValueError(f"Expected actions shape (N, 7), got {actions.shape}")
+
+    # SmolVLA outputs: [x, y, z, rx, ry, rz, gripper] for each action
+    # RLBench expects: [x, y, z, qx, qy, qz, qw, gripper]
+    
+    # Extract position, euler angles, and gripper
+    pos = actions[:, :3]
+    euler = actions[:, 3:6]  # Euler angles in radians
+    gripper = actions[:, 6:7]
+
+    # Convert euler angles to quaternion
+    rotation = Rotation.from_euler('xyz', euler)
+    quat = rotation.as_quat()  # Returns [x, y, z, w]
+    
+    # Ensure quaternion is unit quaternion (normalize)
+    quat = quat / np.linalg.norm(quat)
+    
+    # Combine into RLBench action format: [x, y, z, qx, qy, qz, qw, gripper]
+    return np.concatenate([pos, quat, gripper], axis=1)
 
 
 def test_smolvla(task_name, n_episodes, checkpoint_path):
@@ -190,28 +173,23 @@ def test_smolvla(task_name, n_episodes, checkpoint_path):
     print(f"Using device: {device}")
 
     # Create a trained policy
-    config = make_policy_config("smolvla", max_state_dim=8, max_action_dim=8, resize_imgs_with_padding=(256, 256))
+    config = make_policy_config("smolvla", max_state_dim=8, max_action_dim=7)
     # vla = make_policy(config, ds_meta=dataset.meta)
     vla = SmolVLAPolicy.from_pretrained(checkpoint_path)
     vla.to(device)
     
-    preprocessor, postprocessor = make_pre_post_processors(policy_cfg=config)
-
+    preprocessor, postprocessor = make_pre_post_processors(policy_cfg=config, pretrained_path="RonPlusSign/smolvla_PutRubbishInBin")
+    
     # Create policy
     policy = SmolPolicy(vla, preprocessor, postprocessor, device)
 
     # Set up RLBench environment
     # Configure cameras for observation and video recording
-    camera_config = CameraConfig(
-        rgb=True,
-        depth=False,
-        point_cloud=False,
-        mask=False,
-        image_size=(256, 256)
-    )
+    camera_config = CameraConfig(rgb=True, depth=False, point_cloud=False, mask=False, image_size=(256, 256))
     
     obs_config = ObservationConfig(
         left_shoulder_camera=camera_config,
+        right_shoulder_camera=camera_config,
         overhead_camera=camera_config,
         wrist_camera=camera_config,
         front_camera=camera_config,
@@ -224,27 +202,23 @@ def test_smolvla(task_name, n_episodes, checkpoint_path):
     )
 
     # Set up action mode (end-effector pose control)
-    action_mode = JointPositionActionMode()
-    # action_mode = MoveArmThenGripper(EndEffectorPoseViaPlanning(absolute_mode=True, collision_checking=False), Discrete())
+    # action_mode = JointPositionActionMode()
+    action_mode = MoveArmThenGripper(EndEffectorPoseViaPlanning(absolute_mode=False, collision_checking=False), Discrete())
 
     # Create environment
     env = Environment(action_mode=action_mode, obs_config=obs_config, headless=True)
-
-    # Set max episode length
-    # max_steps = 350 if task_name == "put_rubbish_in_bin" else (750 if task_name == "put_books_on_bookshelf" else 1000)
-    max_steps = 150
+    max_steps = 300 # Set max episode length
 
     # Get task
     env.launch()
     task_class = env._string_to_task(task_name)
     task_env = env.get_task(task_class)
-
     print(f"Testing task: {task_name}")
     
     successes = []
     total_rewards = []
     
-    camera_names = ['left_shoulder_rgb', 'overhead_rgb', 'wrist_rgb', 'front_rgb']
+    camera_names = ['left_shoulder_rgb', 'overhead_rgb', 'wrist_rgb', 'front_rgb']  # To save episode videos
     
     for episode in range(n_episodes):
         try:
@@ -268,21 +242,14 @@ def test_smolvla(task_name, n_episodes, checkpoint_path):
                     for cam_name in camera_names:
                         if hasattr(obs, cam_name) and getattr(obs, cam_name) is not None:
                             frame = getattr(obs, cam_name)
-                            if frame.dtype != np.uint8:
-                                frame = (frame * 255).astype(np.uint8)
                             episode_frames[cam_name].append(frame)
                     
                     # Get action from policy
                     try:
-                        # if step_count < 10:
-                        #     # For the first 10 steps, just go down by -0.05 on z-axis
-                        #     # Create a simple downward action: [dx=0, dy=0, dz=-0.05, qx=0, qy=0, qz=0, qw=1, gripper=1]
-                        #     action = np.array([0.0, 0.0, -0.01, 0.0, 0.0, 0.0, 1.0, 1.0])
-                        #     print(f"Step {step_count + 1}: Using hardcoded downward action")
-                        # else: # After 10 steps, use the normal policy
                         actions = policy.predict(obs, task_description)
+                        actions = convert_euler_to_quat(actions)  # Convert Euler angles to quaternions if needed
                         
-                        # The policy returns N actions, perform them all in sequence
+                        # The policy may return N actions, perform them all in sequence
                         for act in actions:
                             # Take step in environment
                             obs, reward, terminate = task_env.step(act)
@@ -311,8 +278,6 @@ def test_smolvla(task_name, n_episodes, checkpoint_path):
             for cam_name in camera_names:
                 if hasattr(obs, cam_name) and getattr(obs, cam_name) is not None:
                     frame = getattr(obs, cam_name)
-                    if frame.dtype != np.uint8:
-                        frame = (frame * 255).astype(np.uint8)
                     episode_frames[cam_name].append(frame)
             
             # Save episode video
@@ -359,14 +324,9 @@ def test_smolvla(task_name, n_episodes, checkpoint_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test SmolVLA policy on a specific RLBench task using direct RLBench interface")
-    parser.add_argument("--task_name", type=str, 
-                       choices=["put_rubbish_in_bin", "put_books_on_bookshelf", "empty_container"], 
-                       help="Name of the RLBench task to test")
+    parser.add_argument("--task_name", type=str, choices=["put_rubbish_in_bin", "put_books_on_bookshelf", "empty_container"], help="Name of the RLBench task to test")
     parser.add_argument("--n_episodes", type=int, default=10, help="Number of episodes to run for evaluation")
-    parser.add_argument("--checkpoint", type=str, 
-                    #    default="HuggingFaceVLA/smolvla_libero",
-                       default="RonPlusSign/smolvla_PutRubbishInBin",
-                       help="SmolVLA checkpoint to load from HuggingFace")
+    parser.add_argument("--checkpoint", type=str, default="RonPlusSign/smolvla_PutRubbishInBin", help="SmolVLA checkpoint to load from HuggingFace")
     args = parser.parse_args()
     
     # Initialize wandb
