@@ -9,20 +9,19 @@ import dm_env
 from dm_env import specs
 import json
 import imageio
+from scipy.spatial.transform import Rotation as R
 
 from absl import app
 from absl import flags
 
 from rlbench.action_modes.action_mode import MoveArmThenGripper
-from rlbench.action_modes.arm_action_modes import EndEffectorPoseViaPlanning
+from rlbench.action_modes.arm_action_modes import EndEffectorPoseViaIK, EndEffectorPoseViaPlanning
 from rlbench.action_modes.gripper_action_modes import Discrete
 from rlbench.environment import Environment
 from rlbench.observation_config import ObservationConfig
-from rlbench.tasks import PutRubbishInBin, PutBooksOnBookshelf, EmptyContainer
+from rlbench.tasks import *
 from rlbench.demo import Demo, ActionRepresentation
 from play_demo import action_conversion, get_target_pose
-
-LOW_DIM_STATE_SIZE = 91  # Size of the low-dimensional state vector for RLBench tasks. PutRubbishInBin=>91, PutBooksOnBookshelf=>308, EmptyContainer=>70
 
 # Actions are represented by end-effector position and rotation and gripper state. It can be absolute or relative to the current pose (delta).
 # If action_dimension is 7, we have [x y z roll pitch yaw gripper_state], where rotation is in euler angles and gripper_state is 1 or 0.
@@ -78,6 +77,9 @@ def compute_and_save_norm_stats(dataset_path, out_name="norm_stats.json"):
                     value_np = value.numpy()
                 else:
                     value_np = np.asarray(value)
+                    
+                if not hasattr(value_np, 'dtype'):
+                    continue
 
                 # only consider floating types
                 if not np.issubdtype(value_np.dtype, np.floating):
@@ -166,8 +168,8 @@ def save_demo_video(demo, save_path, demo_idx=0, fps=10):
 
     camera_names = [
         "left_shoulder_rgb",
-        "right_shoulder_rgb",
-        "overhead_rgb",
+        # "right_shoulder_rgb",
+        # "overhead_rgb",
         "wrist_rgb",
         "front_rgb",
     ]
@@ -200,6 +202,12 @@ class RLBenchDemoEnvWrapper(dm_env.Environment):
         self.step_idx = 0
         self.current_demo = None
 
+        self.task_descriptions = {
+            "PutRubbishInBin": "throw away the trash, leaving any other objects alone",
+            "PutBooksOnBookshelf": "put 1 books on bookshelf",
+            "EmptyContainer": "remove whatever you find in the big box in the middle and leave them in the red one"
+        }
+
     def reset(self):
         self.demo_idx += 1
         self.step_idx = 0
@@ -220,19 +228,13 @@ class RLBenchDemoEnvWrapper(dm_env.Environment):
     def observation_spec(self):
         spec = {
             "left_shoulder_rgb": specs.Array(shape=(256, 256, 3), dtype=np.uint8, name="left_shoulder_rgb"),
-            "right_shoulder_rgb": specs.Array(shape=(256, 256, 3), dtype=np.uint8, name="right_shoulder_rgb"),
-            "overhead_rgb": specs.Array(shape=(256, 256, 3), dtype=np.uint8, name="overhead_rgb"),
+            # "right_shoulder_rgb": specs.Array(shape=(256, 256, 3), dtype=np.uint8, name="right_shoulder_rgb"),
+            # "overhead_rgb": specs.Array(shape=(256, 256, 3), dtype=np.uint8, name="overhead_rgb"),
             "wrist_rgb": specs.Array(shape=(256, 256, 3), dtype=np.uint8, name="wrist_rgb"),
             "front_rgb": specs.Array(shape=(256, 256, 3), dtype=np.uint8, name="front_rgb"),
-            "joint_velocities": specs.Array(shape=(7,), dtype=np.float32, name="joint_velocities"),
             "joint_positions": specs.Array(shape=(7,), dtype=np.float32, name="joint_positions"),
-            "joint_forces": specs.Array(shape=(7,), dtype=np.float32, name="joint_forces"),
-            "gripper_open": specs.Array(shape=(1,), dtype=np.float32, name="gripper_open"),
-            "gripper_pose": specs.Array(shape=(7,), dtype=np.float32, name="gripper_pose"),
-            "gripper_joint_positions": specs.Array(shape=(2,), dtype=np.float32, name="gripper_joint_positions"),
-            "gripper_touch_forces": specs.Array(shape=(6,), dtype=np.float32, name="gripper_touch_forces"),
-            "task_low_dim_state": specs.Array(shape=(LOW_DIM_STATE_SIZE,), dtype=np.float32, name="task_low_dim_state"),
-            "instruction": specs.Array(shape=(), dtype=str, name="instruction"),
+            "eef_pose": specs.Array(shape=(7,), dtype=np.float32, name="eef_pose"), # [x y z roll pitch yaw gripper_open]
+            "task_description": specs.StringArray(shape=(), name="task_description"),
         }
         return spec
 
@@ -246,20 +248,30 @@ class RLBenchDemoEnvWrapper(dm_env.Environment):
         return specs.BoundedArray(shape=(), dtype=np.float64, minimum=0.0, maximum=1.0, name="discount")
 
     def _observation_to_dict(self, obs):
+        
+        # Convert from quaternion to euler
+        pose_euler = obs.gripper_pose # RLBench gives [xyz quat]
+        if pose_euler.shape[-1] == 7:
+            # convert quat to euler
+            r = R.from_quat(pose_euler[3:7])  # (x, y, z, w)
+            euler = r.as_euler('xyz', degrees=False)  # roll, pitch, yaw
+            pose_euler = np.concatenate([pose_euler[0:3], euler])  # x, y, z, roll, pitch, yaw
+
+        eef_pose = np.concatenate([pose_euler, np.array([obs.gripper_open], dtype=np.float32)])
+        
+        # Get the correct task description, based on the current task name: one of the keys in self.task_descriptions should match the demos_dir
+        task_name = os.path.basename(self.demos_dir)
+        task_description = self.task_descriptions[task_name]
+
         return {
             "left_shoulder_rgb": obs.left_shoulder_rgb,
-            "right_shoulder_rgb": obs.right_shoulder_rgb,
-            "overhead_rgb": obs.overhead_rgb,
+            # "right_shoulder_rgb": obs.right_shoulder_rgb,
+            # "overhead_rgb": obs.overhead_rgb,
             "wrist_rgb": obs.wrist_rgb,
             "front_rgb": obs.front_rgb,
-            "joint_velocities": obs.joint_velocities.astype(np.float32),
             "joint_positions": obs.joint_positions.astype(np.float32),
-            "joint_forces": obs.joint_forces.astype(np.float32),
-            "gripper_open": np.array([obs.gripper_open], dtype=np.float32),
-            "gripper_pose": obs.gripper_pose.astype(np.float32),
-            "gripper_joint_positions": obs.gripper_joint_positions.astype(np.float32),
-            "gripper_touch_forces": obs.gripper_touch_forces.astype(np.float32),
-            "task_low_dim_state": obs.task_low_dim_state.astype(np.float32),
+            "eef_pose": eef_pose.astype(np.float32),  # [x y z roll pitch yaw gripper_open]
+            "task_description": task_description
         }
 
 
@@ -267,7 +279,6 @@ def main(argv):
     try:
         # Dynamically get the task class
         task_class = globals()[FLAGS.task]
-        LOW_DIM_STATE_SIZE = (91 if task_class == PutRubbishInBin else 308 if task_class == PutBooksOnBookshelf else 70)
     except KeyError:
         raise ValueError(f"Task {FLAGS.task} not found.")
 
@@ -283,7 +294,7 @@ def main(argv):
     obs_config = ObservationConfig()
     obs_config.set_all(True)
     action_mode = MoveArmThenGripper(
-        arm_action_mode=EndEffectorPoseViaPlanning(absolute_mode=FLAGS.absolute_actions),
+        arm_action_mode=EndEffectorPoseViaIK(absolute_mode=FLAGS.absolute_actions),
         gripper_action_mode=Discrete(),
     )
     env = Environment(action_mode, obs_config=obs_config, headless=True)
@@ -301,11 +312,6 @@ def main(argv):
             demo = task.get_demos(1, live_demos=True)[0]
             demo.save(demo_file, action_representation=action_repr())
             del demo
-        # else: # Load the demo and save it again
-        #     demo = Demo.load(demo_file)
-        #     demo.save(demo_file, action_representation=action_repr())
-        #     del demo
-
     # Generate RLDS dataset
     dataset_path = os.path.join(FLAGS.save_path,
                                 "rlds",
@@ -319,19 +325,13 @@ def main(argv):
         name=f"{FLAGS.task}_{FLAGS.action_repr}_{'absolute' if FLAGS.absolute_actions else 'relative'}",
         observation_info={
             "left_shoulder_rgb": tfds.features.Image(shape=(256, 256, 3), dtype=tf.uint8),
-            "right_shoulder_rgb": tfds.features.Image(shape=(256, 256, 3), dtype=tf.uint8),
-            "overhead_rgb": tfds.features.Image(shape=(256, 256, 3), dtype=tf.uint8),
+            # "right_shoulder_rgb": tfds.features.Image(shape=(256, 256, 3), dtype=tf.uint8),
+            # "overhead_rgb": tfds.features.Image(shape=(256, 256, 3), dtype=tf.uint8),
             "wrist_rgb": tfds.features.Image(shape=(256, 256, 3), dtype=tf.uint8),
             "front_rgb": tfds.features.Image(shape=(256, 256, 3), dtype=tf.uint8),
-            "joint_velocities": tfds.features.Tensor(shape=(7,), dtype=tf.float32),
             "joint_positions": tfds.features.Tensor(shape=(7,), dtype=tf.float32),
-            "joint_forces": tfds.features.Tensor(shape=(7,), dtype=tf.float32),
-            "gripper_open": tfds.features.Tensor(shape=(1,), dtype=tf.float32),
-            "gripper_pose": tfds.features.Tensor(shape=(7,), dtype=tf.float32),
-            "gripper_joint_positions": tfds.features.Tensor(shape=(2,), dtype=tf.float32),
-            "gripper_touch_forces": tfds.features.Tensor(shape=(6,), dtype=tf.float32),
-            "task_low_dim_state": tfds.features.Tensor(shape=(LOW_DIM_STATE_SIZE,), dtype=tf.float32),
-            # "instruction": tfds.features.Text(),
+            "eef_pose": tfds.features.Tensor(shape=(7,), dtype=tf.float32), # [x y z roll pitch yaw gripper_open]
+            "task_description": tfds.features.Text(),
         },
         action_info=tfds.features.Tensor(shape=(action_dimension(),), dtype=tf.float64),
         reward_info=tf.float64,
@@ -351,7 +351,8 @@ def main(argv):
     with envlogger.EnvLogger(wrapped_env, backend=backend) as env_logger:
         for demo_idx in tqdm(range(FLAGS.num_episodes), desc="Recording demonstrations"):
             env_logger.reset()
-            demo = Demo.load(os.path.join(demos_dir, f"demo_{demo_idx:03d}.pkl"))
+            demo_file = os.path.join(demos_dir, f"demo_{demo_idx:03d}.pkl")
+            demo = Demo.load(demo_file)
 
             current_pose = get_target_pose(demo, 0)
             for i, _ in enumerate(demo.actions):

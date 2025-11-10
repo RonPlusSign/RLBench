@@ -97,8 +97,15 @@ class Demo(object):
     @staticmethod
     def load(file_path: str) -> "Demo":
         """Load a demo instance from disk."""
+        
         with open(file_path, "rb") as f:
-            return pickle.load(f)
+            demo = pickle.load(f)
+            
+            # Repeat the last observation 5 times
+            last_obs = demo._observations[-1]
+            for _ in range(5):
+                demo._observations.append(last_obs)
+        return demo
 
     def restore_state(self):
         np.random.set_state(self.random_seed)
